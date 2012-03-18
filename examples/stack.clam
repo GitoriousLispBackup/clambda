@@ -1,0 +1,470 @@
+(use-modules (language clambda clambda))
+(init-clambda)
+#|
+Copyright: Stefan Israelsson Tampe
+Licence  : LGPL, any version.
+|#
+
+
+#|
+Stack implementation in clambda 
+
+The whole idea here is to streamline different stack semantics to support
+continuations, fluids, dynwinds, stack pushing, call stacks, prompting
+and so on.
+
+Use multiple stacks to achieve this!
+|# 
+
+(define-syntax init-rest
+  (syntax-rules ()
+    ((_)   (<call> init-rest0 -1))
+    ((_ x) (<call> init-rest0  x))))
+
+
+(<declare> (char *) alloc-from-stack ((int id) (int size)))
+ 
+#|
+Stacks will be composed of linked arrays and hence are more complex
+then pure linked lists or array's. Should be faster then linked lists and
+more adaptive then pure arrays.
+|#
+
+;; standard stack chunk size
+(<const> int stack-size 1024)
+
+#|
+the stack chunk that is linked together
+size is the size of the chunk, data are the datavector
+pt is the stack pointer in this chunk
+head is a link to the head pointer
+prev is the previous stack chunk (this is a singly linked list)
+|#
+
+(<struct> stack
+          ((int        size)
+           ((char  *)  data)
+           ((char  *)  pt  )
+           ((stack **) head)
+           (int        splitted?)
+           ((stack  *) budy)
+           ((stack  *) prev)))
+
+;; to describe a point in the stack we need this
+(<struct> stack-frame
+          (((stack  *)  head)
+           ((char   *)  pt  )))
+
+(load "fluid.clam")
+ 
+#| ****************************** UNWINDING ***************************
+stack-frame 0 data
+stack-frame 1 data
+stack-frame 0 data
+...
+
+at unwinding we need to find the first stack frame for an id and
+then unwind all the stacks.
+|# 
+
+
+
+#|
+;; when traversion the action stack at each stack action we will
+;; update below globals to keep track on which stacks has been used
+;; and where the first frame is stored. This information will then
+;; be cleaned up.
+|#
+;; STACK-ACTION
+;; GLOBALS
+
+#|
+The idea here is that we make use of a multiple of separate stacks and each 
+stack has an id that represents a type of stack
+ 
+*stack-list* -> *stack-actions* -> (stack-action *)  
+
+This is a standard dereference scheme. But instead of pointer dereferences
+we use arrays in order to save space 8x8 -> 1x8 e.g. 8x savings
+|#
+(<global>   (%array  (stack        *)  256)   *stacks*         )
+(<global>   (%array  (stack-action *)  256)   *stack-actions*  )
+(<global>   (%array  int               256)   *stack-list*     )
+(<global>   int                               *last-stack-id* 0)
+
+;;on splitting the stacks we will put the lists here
+(<global>   (%array  (stack        *) 256)    *res-stacks*    )
+(<global>   (stack **)                        *res-stack-pt*  )
+ 
+
+;; final logic
+
+
+
+(<declare> (stack *) unwind ( ((stack-frame *) sf )
+                              ((stack **)      stp)
+                              (int             split?)))
+
+(<declare> void free-stack  (((stack *) s)))
+(<declare> (stack *) new-stack  ())
+(<declare> (stack *) new-block  ())
+
+
+(<syntax>
+ ((define-syntax get-stack
+    (syntax-rules ()
+      ((_ i)
+       (auto (<ref> *stack-actions* (<ref> *stack-list* i))))))
+
+  (define-syntax stack-fix
+    (syntax-rules ()
+      ((_ t a)   
+       (<cast> (action *) 
+               (<-> a (<addr> (<.> (<cast> t 0) 
+                                   header)))))))
+  (define-syntax push-res-stack
+    (syntax-rules ()
+      ((_ r)
+       (<begin>
+        (<=> (<*> *res-stack*) r)
+        (<++> *res-stack*)))))
+
+  (define-syntax clear-stack
+    (syntax-rules ()
+      ((_ i)
+       (<=> (<ref> *stack-actions* (<ref> *stack-list* i)) 0))))
+
+  (define-syntax action-at-stack-frame
+    (syntax-rules ()
+      ((a sf)
+       (<==> (<cast> (char *) a) (<ref> sf pt))))))
+
+ ;; After usage statistics have been collected 
+ ;; here we unwind the individual stacks.
+
+ (<declare> void unwind-actions (((stack-frame *) sf) 
+                                 ((stack **)      stp)  
+                                 (int             split?)))
+
+ (<declare> void add-branch  (((stack **)  spp)
+                              ((stack *)   sp )
+                              ((stack **)  spp)))
+
+ (<define> void unwind-dependent-stacks  ((int unwind?))
+   (<recur> loop ((int i 0))
+     (<if> (q< i *last-stack*)
+           (<let*> 
+            (((stack-action *) sta  
+              (get-stack i))
+             ((stack        *) res
+              ;; recursively apply an action stack and
+              ;; optionally link on a branch
+              (<if> (-> res action?)
+                    (<let*> (((stack **) save *res-stack-pt*)
+                             ((stack **) sh 
+                              (=> sta -> sf - head -> head)))
+                            (<call> unwind-actions
+                                    (<addr> (=> sta -> sf))
+                                    sh
+                                    unwind?)
+                            (<let*> (((stack *) s
+                                      (<call> unwind (-> sta s)
+                                              (-> sta fr)
+                                              unwind?)))
+                                    (<if> unwind?
+                                          (<call> add-branch save s
+                                                  sh))
+                                    (<=> *res-stack-pt* save)
+                                    s))
+                    (<call> unwind (-> sta s)
+                            (-> sta fr)
+                            unwind?))))
+
+            (<if> unwind? (push-res-stack res))
+            (clear-stack i)	     
+            (<next> loop (<+> i 1)))
+           (<=> *last-stack* 0))))
+
+
+ (<define> (stack *) unwind-actions
+           (((stack-frame *)  sf    ) 
+            ((stack **)       stp   ) 
+            (int              split?))
+
+   (<let*> (((stack  *) st (<*> stp))
+            ((action *) sa (<cast> (action *) (-> st pt))))
+           (<recur> loop (((stack  *) s   st)
+                          ((action *) a   sa))
+
+             ;;action performed on each item
+             (<case> (-> a type)
+                     ;; stack
+                     (0  (<begin> 
+                          (<=> a (stack-fix stack-action a))
+                          (<call> update-stack-action 
+                                  (<cast> (stack-action *) a))))
+
+                     ;; var
+                     (1  (<begin>
+                          (<=> a (stack-fix var-action a))
+                          (<call> update-var-action split?
+                                  (<cast> (var-action *) a))))
+                     ;; fluid
+                     (2  (<begin>
+                          (<=> a (stack-fix fluid-action a))
+                          (<call> update-var-action split?
+                                  (<cast> (fluid-action *) a))))
+                     ;; branch
+                     (3  (<begin>
+                          (<=> a (stack-fix fluid-action a))
+                          (<call> update-branch-action split?
+                                  (<cast> (fluid-action *) a))))
+                     )
+                 
+             ;;check to see if we are at the end of a chunk
+             (<cond> 
+              ((<==> (<cast> (char *) a) (-> sf pt))
+               ;; We have finished the action unwinding,
+               ;; unwind separate collected stacks 
+               (<call> unwind-dependent-stacks split?))
+       
+              ((<==> (<cast> (char *) a) (-> a data))
+               ;;we are at the beginning of a stack chunk
+               ;; Continue with unwinding be chaining to previous stack
+               (<let*> (((stack *) sold s))
+                       (<begin>
+                        (<=> s (-> s prev))
+                        (<call> free-stack sold)
+                        (<next> loop s (-> s pt)))))
+              
+              (:t  (<next> loop s (<-> a 1))))))))
+
+#|
+The stack is a linked list of arrays. The idea here is to
+make the stacks be able to grow and schrink and also easally
+connect into DAG's that is also interesting
+
+stack* (unwind  stack-frame stack split?)
+this will unwind the stack stack to the stack-frame level
+
+stack * (unwind-split stack-frame stack)
+this will unwind the stack and return the passed stack
+
+if split? is true (1) then we will link the frames reversly that
+represents a redo list and return that else the new last stack is 
+returned. 
+|#
+
+
+
+
+(<define> (stack *) unwind (((stack-frame *)  sf    ) 
+                            ((stack  **)      stp   ) 
+                            (int              split?)) 
+
+  (<let*> (((stack *) st  (<*> stp))
+           ((stack *) ret st))
+          
+    ;;calculate new stack block in case of splitting to save mem overhead
+    (<if> split?
+          (<begin>
+           (<if> (<and> split?
+                        (q> (</> (<-> (-> st pt) (-> st data)) 
+                                 (<cast> float (-> st size)))
+                            0.1))
+                 (<begin>
+                  (<=> ret (<call> new-stack))
+                  (<=> (-> ret data) (-> st pt))
+                  (<=> (-> ret pt  ) (-> st pt))
+                  (<=> (-> ret size) (<-> (-> st size) 
+                                          (<-> (-> st pt) (-> st data))))
+                  (<=> (-> st  size) (<-> (-> st pt)   
+                                          (<-> (-> st data)))))
+                 (<=> ret (<call> new-block)))
+           ;; -- fill in ret meta information
+           (<=> (-> ret budy)      st)
+           (<=> (-> st  splitted?)  1)
+           (<=> (<*> stp) ret)
+           (<=> (-> ret head) stp)
+           ;(-> ret prev) is linked further down
+           (<=> (-> ret splitted?) 0)))
+           
+
+    (<recur> loop (((stack *) s st) ((stack *) old st))
+      (<if> (<==> s (-> sf stack))
+            (<begin>
+             ;;top needs to point to new first stack
+             (<=> (<*> stp) s)
+
+             ;;truncate
+             (<=> (-> s pt) (-> sf pt))
+
+             (<if> split?
+                   (<let*> ((int       i    (<-> (-> s pt)
+                                                 (-> s data)))
+                            (int       n    (<-> (-> s size) i))
+                            ((stack *) ns   (<call> new-stack))
+                            ((char  *) data (-> s pt)))                         
+                           
+                      ;;topmost correction - saves mem overhead             
+                      (<=> (-> ret prev) s)
+
+                      ;; fill in data for the new stack
+                      (<=>  (-> ns data)   data)
+                      (<=>  (-> ns size)   n   )			
+                      (<=>  (-> ns pt  )   data)
+                      (<=>  (-> ns head)   stp )
+                      (<if> (<==> old st) 
+                            (<=>  (-> ns prev)  null)
+                            (<=>  (-> ns prev)  old))
+                      (<=>  (-> ns budy    ) s)
+                      (<=>  (-> ns splitted?) 0)
+
+                      ;; trunction of current stack and mark splitted
+                      (<=> (-> s size)   i)
+                      (<=> (-> s splitted?) (<+> 1 (-> s splitted?)))
+                      ;; return the splitted stack
+                      ns)
+                   s))
+            (<begin>
+             (<if> split?
+                   (<if> (<==> s old)
+                         (<=> (-> s prev) null)
+                         (<=> (-> s prev) old)))
+             (<next> loop (-> s prev) s))))))
+
+
+;; ********************************** stack allocation ************
+#|
+From stack system id it will fetch a (char *) chunk to be used
+it will check if there is an overflow of the chunk and in that 
+case link in a new datastructure. this assumes that we do not 
+allocate too large chunks of data a restriction that has to be managed
+by the caller e.g. this is a low level routine.
+|#
+(<define> (char *) alloc-from-stack ((int id) (int size))
+   (<let*> (((stack **) sp (<ref> *stacks* id))            
+            ((stack  *) s  (<*> sp))
+            (int        i  (<-> (-> s pt) (-> s data))) 
+            (int        n  (<+> size i)))
+     (if (q> n (-> s size))
+         ;;we need to allocate a new stack
+         (<let*> (((stack *) ns  (<call> new-block))
+                  ((char  *) ret (-> ns pt)))
+             (<=> (-> ns prev) s)
+             (<=> (-> ns head) (-> s head))
+             (<=> (-> ns pt  ) (<+> (-> ns pt) size))
+             
+             ;; budy information - this is unsplitted and fresh
+             (<=> (-> ns splitted?) 0)
+             (<=> (-> ns budy)      0)
+             (<=> (<*> sp) ns)
+             ret)
+         (<let*> (((char *) ret (-> s pt)))
+             (<=> (-> s pt  ) (<+> (-> s pt) size))
+             ret))))
+
+#|
+This inserts a stackframe into the action stack (stack 0) we simply
+allocates a slot and fill it in and return it
+|#
+
+(<define> (stack-action *) insert-stack-frame ((int stack-id))
+   (<let*> (((stack-action *) sa (<cast> (stack-action *)
+                                         (<call> alloc-from-stack 0
+                                                 (<size-of> stack-action))))
+            ((stack *)        s  (<ref> *stacks* stack-id)))
+      (<=> (-> sa id   ) id)
+      (<=> (<.> (-> sa sf)     stack)  s        )
+      (<=> (<.> (-> sa sf)     pt   )  (-> s pt))
+      (<=> (<.> (-> sa header) type )  0        )
+      sa))
+
+
+
+#|
+************************* STACK BLOCK DATA ************
+|#
+
+;;10 MB stack to test the framework (never schrinks)!!
+(<global> int *maxchunks*  10000)
+(<const>  int *nchunks*    1000)
+(<const>  int *chunk-size* 1024)
+(<global> (stack *) *free-chunks* null)
+
+"
+typdef struct chunk {
+   stack                 stack;
+   char[_schunk__size_s] data;
+} chunk;
+"
+
+(<define> void add-chunks ((int n))
+          (<let*> ((int      nn (<if> (q< n 0)
+                                      *nchunks*
+                                      n))
+                   ((chunk *) pt (<malloc> (chunk *) 
+                                           nn (<size-of> chunk))))
+             #;
+             (<if> (<or> (<not> pt) (q< *maxchunks* 0))
+                  (<stack-error>))
+             (<=> *maxchunks* (<-> *maxchunks* nn))
+             (<recur> loop ((int i nn))
+                (<if> (q> i 0)
+                      (<begin>
+                       (<=> (<.> (-> pt stack) prev) *free-chunks*)
+                       (<=> *free-chunks* (<cast> (stack *) pt))
+                       (<++> pt)
+                       (<next> loop (<-> i 1)))))))
+
+                          
+(<define> (stack *) new-stack () (<malloc> (stack *) 1 (<size-of> stack)))
+
+
+(<define> (stack *) new-block ()
+     (<if> *free-chunks*
+         (<let*> (((stack *) s (<addr> (-> *free-chunks* stack))))
+                 (<=>  (-> s size)   *chunk-size*)
+                 (<=>  (-> s data)   (<addr> (-> *free-chunks* data)))
+                 (<=>  (-> s pt  )   (-> s data))
+                 (<=>  *free-chunks* (-> *free-chunks* prev))
+                 s)
+         (<begin>
+          (<call> add-chunks *nchunks*)
+          (<call> new-stack))))
+
+
+(<define> void free-stack (((stack *) s))
+   ;;for a splitted stack we will wait for buddying       
+   (<if> (-> s splitted?)
+        ;;mark the stack as deleted        
+        (<=> (-> s pt) 0)
+        
+        ;;for buddies
+        (<recur> loop (((stack *) ss s))
+          (<if> (-> ss budy)
+              ;;for a budy
+              (<let*> (((stack *) budy (-> ss budy)))
+                 (<if> (q> (-> budy splitted?) 1)
+                       (<begin>
+                        (<--> (-> budy splitted?))
+                        (<free> ss))
+                       (<if> (<not> (-> budy pt))
+                             ;;the budy stack has been deleted dive
+                             (<begin>
+                              (<=> (-> budy splitted?) 0)
+                              (<free> ss)
+                              (<next> loop budy))
+
+                             ;;mark the budy as not splitted anymore
+                             (<begin>
+                              (<free> ss)
+                              (<=> (-> ss budy splitted?) 0)))))
+              
+              (<begin>
+               (<=> (-> ss prev) *free-chunks*)
+               (<=> *free-chunks* s))))))
+
+)
+
+(clambda->c "stack.c")

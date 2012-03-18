@@ -1,0 +1,141 @@
+#|
+ Actions. We will need to define action when linking stacks.
+ actions is a stack of their own.
+ |#
+
+
+
+(<struct> action
+          ((char  type  )))
+
+;;-------------------------------  the stack action type == 0
+(<struct> stack-action
+          ((char        type   )
+           (char        id     )
+           (stack-frame sf     )
+           (action      header )))
+
+
+(<syntax>
+ ((define-syntax push-stack-id
+    (syntax-rules () 
+      ((_ id)
+       (<begin>
+        (<=> (<ref> *stack-actions* *last-stack-id*) id)
+        (<++> *last-stack-id*)))))
+
+  (define-syntax set-stack-action
+    (syntax-rules ()
+      ((_ id sa)
+       (auto (<=> (<ref> *stack-actions* id) sa))))))
+
+ ;; this is called from the end down to the initial stack frame
+ ;; means that we get a list of active stack id's and an array
+ ;; of the initial individual stack frames. To have low overhead.
+ (<define> void update-stack-action (((action *) a))
+   (<let*> (((stack-action *) sa  (<cast> (stack-action *) a))
+            ( int             id  (-> sa id))
+            ((stack-action *) old (<ref> *stack-list* id)))     
+     (<if> (<not> old) (push-stack-id id))
+     (set-stack-action id sa))))
+
+
+
+;; ------------------------------ var action type == 1
+(<struct> var-action
+	  ((char type)
+           (SCM* var)
+           (action header)))
+
+(<define> void update-var-action
+              ((int split?)
+               ((var-action *) a))
+   (<if> split? (<error> "var actions are not redoable"))
+   (<=> (<*> (-> a var)) "SCM_UNDEFINED"))
+
+
+(<define> (var-action *) get-var-action ((int id))
+  (<let*> (((var-action *) ret 
+            (<cast> (var-action *)
+                    (<call> alloc-from-stack 
+                            id (<size-of> var-action)))))
+    (<=> (->  ret type) 2) 
+    (<=> (-.> ret header type) 2))) 
+
+
+;; ----------------------------- guile fluid action type == 2
+(<struct> fluid-action
+	  ((char   type )
+           (SCM    val  )
+           (SCM*   var  )
+           (action header)))
+
+(<define> void update-fluid-action 
+               ((int split?)
+               ((var-action *) a))
+   (<if> split?
+         (<begin>
+          (<let*> ((v (<*> (-> a var))))
+             (<=> (<*> (-> a var)) (-> a val))
+             (<=> (-> a val) v)))
+         (<=> (<*> (-> a var)) (-> a val))))
+
+(<define> (fluid-action *) get-fluid-action ((int id))
+  (<let*> (((fluid-action *) ret 
+            (<cast> (fluid-action *)
+                    (<call> alloc-from-stack 
+                     id (<size-of> fluid-action)))))
+    (<=> (->  ret type) 2) 
+    (<=> (-.> ret header type) 2))) 
+
+(<declare> void update-branch-action
+               ((int              n)
+               ((branch-action *) ba)))
+
+#| 
+;; -------------------------------- branch type == 3
+(<struct> branch-action
+          ((int size)           
+           (action header)))
+
+(<define> (void free-branch) ((stack *) h)
+  (<recur> loop (((stack *) s) ((char *) pt (-> s data)))
+    (<if> (<==> pt (-> s pt))
+          (<if> (-> s prev)
+                (<next> loop (-> s prev) (-> sprev data)))
+          (<let*> (((action *) a (<cast> (action *) pt)))
+            (case (-> a type)
+              (0  (<next> loop s (<+> pt (<size-of> stack-action)))))
+              (1  (<next> loop s (<+> pt (<size-of> var-action))))
+              (2  (<next> loop s (<+> pt (<size-of> fluid-action))))
+              (3
+               (<let*> (((bhead         *) bh (<cast> (bhead *) a))
+                        ((branch-action *) b  
+                         (<cast> (branch-action *)
+                                 (<+> pt 
+                                      (<size-of> bhead)
+                                      (<*> (-> bh size) 
+                                           (<size-of> (stack *)))))))
+                                                       
+                 (<call> update-branch-action 0 b)
+                 (<next> loop s (<cast> (char *) (<+> b 1)))))))))
+
+                
+#;
+(<define> (void update-branch-action) 
+               ((int split?)
+               ((branch-action *) a))
+  (<if> (<not> split?)
+        ;;free the other brances, e.g. make sure they are freed
+        (<let*> ((stack *)  h (<-> (<cast> (stack *) a)
+                                   (-> a size)))
+          (<recur> loop (((stack *) s h) (int i (-> a size)))
+            (if (q> i 0)
+                (<begin>
+                 (if (-> s action-stack) (free-branch s))
+                 (<call> free-stack-branch s)
+                 (<next> loop (<++> s) (<--> i)))))
+          (<free> h))))
+|#
+)
+

@@ -1,0 +1,10 @@
+GNU Lesser General Public License (LGPL) version 2
+
+Copyright (c) Stefan Israelsson Tampe All right reserved,
+ 
+Except for fmt-0.8 in language/clambda/, where the code is under Copyright of 
+under a VSD style license see fmt.scm in fmt-0.8
+
+Copyright (c) 2006-2009 Alex Shinn.
+
+See "COPYING.LIB" for more information about the license.
