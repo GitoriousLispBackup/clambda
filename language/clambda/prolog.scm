@@ -10,34 +10,34 @@
 
 (define-syntax :fail:
   (syntax-rules ()
-    ((_ (cc cut fail)) (! <tcall> fail))))
+    ((_ (s cc cut fail)) (<tcall> fail))))
 
 (define-syntax :cc:
   (syntax-rules ()
-    ((_ (cc cut fail)) (! <tcall> cc fail))))
+    ((_ (s cc cut fail)) (<tcall> cc s fail))))
 
 (define-syntax :cut:
   (syntax-rules ()
-    ((_ (cc cut fail)) (! <tcall> cc cut))))
+    ((_ (s cc cut fail)) (<tcall> cc s cut))))
 
 (define-syntax :and:
   (syntax-rules ()
     ((_ w x)   (Y w x))
-    ((_ (cc cut fail) (:cut:) . l)
-     (:and: (cc cut cut) . l))     
-    ((_ (cc cut fail) x . l)
-     (<let> ((ccc (<lambda> (fail) (:and: (cc cut fail) . l))))
+    ((_ (s cc cut fail) (:cut:) . l)
+     (:and: (s cc cut cut) . l))     
+    ((_ (s cc cut fail) x . l)
+     (<let> ((ccc (<lambda-log> (s) (s fail) (:and: (s cc cut fail) . l))))
        (Y (ccc cut fail) x)))))
 
 (define-syntax :or:
   (syntax-rules ()
     ((_ w x)      (Y w x))
-    ((_ (cc cut fail) x . l)
-     (<let*> ((P (<scm-call> c_newframe))
-              (f (<lambda> () 
-                   (<scm-call> c_unwind P)
-                   (or-work P (cc cut fail) . l))))
-       (Y (cc cut f) x)))))
+    ((_ (s cc cut fail) x . l)
+     (<let*> ((p (<scm-call> c_newframe s))
+              (f (<lambda-log-p> (s) () 
+                   (<scm-call> c_unwind p)
+                   (or-work (p cc cut fail) . l))))
+       (Y (p cc cut f) x)))))
 
 (define-syntax or-work
   (syntax-rules ()
