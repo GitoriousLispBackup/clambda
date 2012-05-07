@@ -2,7 +2,18 @@
   #:use-module (language clambda clambda)
   #:use-module (language clambda scm)
   #:export (:fail: :cc: :cut: :and: :or: :call: :var: :not: :when:
-                   ::when:: :=: :match: :define: :pp: :code:))
+                   ::when:: :=: :match: :define: :pp: :code: _ S))
+
+(define-syntax S
+  (lambda (x) (error "S feature only in code environment")))
+
+
+(define-syntax _
+  (lambda (x)
+    (syntax-case x ()
+      ((_ . l) #'(error "__ is a symbol macro"))
+      (_       #'(<scm-call> gp_mkvar S)))))
+
 
 (define-syntax Y
   (syntax-rules ()
@@ -24,26 +35,36 @@
     ((_ (s cut fail cc) :cut: . l)
      (:and: (s cut cut cc) . l))     
     ((_ (s cut fail cc) x . l)
-     (<let> ((ccc (<lambda-log> s (s fail) 
-                     (:and: (s cut fail cc) . l))))
+     (<let> ((ccc (<lambda-log> s (s fail2) 
+                     (:and: (s cut fail2 cc) . l))))
        (Y (s cut fail ccc) x)))))
 
 (define-syntax :or:
   (syntax-rules ()
     ((_ w x)      (Y w x))
     ((_ (s cut fail cc) x . l)
-     (<let*> ((P (<scm-call> c_newframe s))
+     (<let*> ((P (<scm-call> gp_newframe s))
               (f (<lambda-log-p> s () 
                     (<scm-call> gp_gp_unwind P)
                     (or-work (P cut fail cc) . l))))
        (Y (P cut f cc) x)))))
 
+(define-syntax with-S
+  (syntax-rules ()
+    ((_ s code ...)
+     (fluid-let-syntax ((S (lambda (x)
+                             (syntax-case x ()
+                               ((_ . l) #'(error "S is a symbol macro"))
+                               (_ #'s)))))
+         code ...))))
+
 (define-syntax :code:
   (syntax-rules ()
     ((_ (s cut p cc) x ...)
-     (<begin>
-      x ...
-      (<tcall-log> cc s p)))))
+     (with-S s
+        (<begin>
+         x ...
+         (<tcall-log> cc s p))))))
 
 (define-syntax or-work
   (syntax-rules ()
@@ -70,31 +91,35 @@
   (syntax-rules ()
     ((_ (s cut fail cc) x)
      (<let*> ((P   (<scm-call> gp_newframe s))
-              (ccc (<lambda-log> s (ffail) 
+              (ccc (<lambda-log> P (ss ffail) 
                      (<tcall-log> fail)))
-              (f   (<lambda-log-p> s ()
+              (f   (<lambda-log-p> P ()
                      (<scm-call> gp_gp_unwind P)
                      (<tcall-log> cc s fail))))
        (Y (s cut f ccc) x)))))
 
 (define-syntax :when:
-  (syntax-rules ()
-    ((_ w c-expr code ...)
-     (<if> c-expr
-           (:and: w code ...)
-           (:fail: w)))))
+  (lambda (x)
+    (syntax-case x ()
+      ((_ w c-expr code ...)
+       (with-syntax (((s . _) #'w))
+         #'(<if> (with-S s c-expr)
+                 (:and: w code ...)
+                 (:fail: w)))))))
 
 (define-syntax ::when::
-  (syntax-rules ()
-    ((_ w scm-expr code ...)
-     (<<if>> scm-expr
-             (:and: w code ...)
-             (:fail: w)))))
+  (lambda (x)
+    (syntax-case x ()
+      ((_ w scm-expr code ...)
+       (with-syntax (((s . _) #'w))
+         #'(<<if>> (with-S s scm-expr)
+                   (:and: w code ...)
+                   (:fail: w)))))))
 
 (define-syntax :=:
   (syntax-rules ()
     ((_ (s cut p cc) x y)
-     (<let> ((SCM s (<scm-call> gp_gp_unify x y s)))
+     (<let> ((SCM s (<scm-call> gp_gp_unify (with-S s x) (with-S s y) s)))
        (<<if>> s 
           (<tcall-log> cc s p)
           (<tcall-log> p))))))
@@ -109,10 +134,10 @@
 ;;Todo fix this
 (define-syntax :pp:
   (syntax-rules ()
-    ((_ (s . l) stream v ...)
-     (:code: (s . l) 
-             (<format> stream (<scm-call> smob2scm v s) ...)
-             (<format> stream "~%")))))
+    ((_ (s . l) v)
+     (:code: (s . l)
+       (<format> #t "~a~%" (<scm-call> smob2scm (<scm> v) s))))))
+
 
 (define-syntax :match:
   (lambda (x)
@@ -132,13 +157,13 @@
                       (<scm-call> gp_gp_unwind P)
                       (match0 P (s cut fail cc) ps . l))))
        (match1 (s cut ffail cc) ps (p ...) code)))
-    ((_ P (cc cut fail s) ps)
+    ((_ P (s cut fail cc) ps)
      (<tcall-log> fail))))
 
 (define-syntax match1
   (syntax-rules ()
     ((_ w (p ps ...) (q qs ...) code)
-     (match2 w p q (match1 w (ps ...) (qs ...) (:and: code))))
+     (match2 w p q (match1 (ps ...) (qs ...) (:and: code))))
     ((_ w () () code)
      (Y w code))))
 
@@ -156,13 +181,13 @@
     ((_ (s . l) x (p . q) code)
      (<let*> ((s (<scm-call> gp_pair_bang x s)))
        (<<if>> s
-         (<let> ((car (<scm-call> gp_car    r s))
-                 (cdr (<scm-call> gp_gp_cdr r s)))
+         (<let> ((car (<scm-call> gp_car    x s))
+                 (cdr (<scm-call> gp_gp_cdr x s)))
            (match2 (s . l) car p (match2 cdr q code)))
          (:fail: (s . l)))))
 
     ((_ w x _  code) 
-     (add-s w code)
+     (add-s w code))
 
     ((_ (s . l) x () code)
      (<let*> ((s (<scm-call> gp_null_bang x s)))
@@ -183,6 +208,6 @@
 (define-syntax :define:
   (syntax-rules ()
     ((_ (f . l) code ...)
-     (define-log (f s p cc . l) (Y (s fail fail cc) (:and: code ...))))))
+     (define-log (f s fail cc . l) (Y (s fail fail cc) (:and: code ...))))))
 
         

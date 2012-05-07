@@ -11,7 +11,8 @@
               <number?> <integer?> <fixnum->int> <number->double>
               <double->number> ! <lambda> <scm-alloc> <format>
               <tcall> <tr-call> <<define>> <int->fixnum> <s-lambda>
-              <f-lambda> define-log <tcall-log> <lambda-log> <lambda-log-p>))
+              <f-lambda> define-log <tcall-log> <lambda-log> <lambda-log-p>
+              yield-log))
 
 (define (pp x)
   (format #t "~10a~%" (syntax->datum x))
@@ -670,7 +671,7 @@ be very slow.
   (lambda (x)
     (syntax-case x ()
       ((_ f a ...)
-       #'(tcall-pre 0 () () ((auto a) ...) (auto f) tcall-log)))))
+       #'(tcall-pre 1 () () ((auto a) ...) (auto f) tcall-log)))))
 
 
 (define-syntax tcall-pre
@@ -705,10 +706,11 @@ be very slow.
       ('expr #f)
       (v     (code v)))))
 
-(define -frame   (mk-var '(SCM *) '__frame #f 'no-gensym)) 
-(define -stack   (mk-var '(SCM *) '__stack #f 'no-gensym)) 
-(define -closure (mk-var '(SCM *) '__closure #f 'no-gensym)) 
-(define -index   (mk-var '(SCM *) '__index #f 'no-gensym)) 
+(define -frame    (mk-var '(SCM *) '__frame #f 'no-gensym)) 
+(define -stack    (mk-var '(SCM *) '__stack #f 'no-gensym)) 
+(define -closure  (mk-var '(SCM *) '__closure #f 'no-gensym)) 
+(define -closure2 (mk-var '(SCM *) '__closure2 #f 'no-gensym)) 
+(define -index    (mk-var '(SCM *) '__index #f 'no-gensym)) 
 
 (define-syntax tcall
   (lambda (x)
@@ -744,19 +746,13 @@ be very slow.
   (lambda (x)
     (syntax-case x ()
       ((_ f n (i ...) (a ...))
-       (with-syntax ((assert-stack 
-                      (if (> (syntax->datum #'n) 10)
-                          #'(<icall> 'assert-stack -stack (<c> n))
-                          #'(<nop>))))
-
        #'(tcall-it 
           (<begin>
-           assert-stack
-           (<let> (((SCM *) s (<-> (<*> -stack) -index)))
+           (<let*> (((SCM *) s (<-> (<*> -stack) -index)))
              (<=> (<ref> s (<c> 0)) f)
              (<=> (<ref> s (<c> i)) a) ...
-             (<=> (<*> -stack) (<+> n s)) 
-             (<return> n)))))))))
+             (<=> (<*> -stack) (<+> (<c> (- n 1)) s)) 
+             (<return> (<c> (- n 1))))))))))
                    
 
 
@@ -847,7 +843,7 @@ be very slow.
   (lambda (x)
     (syntax-case x ()      
       ((_ (f a ...) code ...)
-       #'(tcall-pre 0 () () (a ...) (f code ...) def)))))
+       #'(tcall-pre 1 () () (a ...) (f code ...) def-log)))))
 
 
 (define (putback v beg)
@@ -869,8 +865,8 @@ be very slow.
     (syntax-case x ()
       ((_ (f code ...) n (i ...) (a ...))
        #'(<define> int f (((SCM **) -stack) (int -index) ((SCM *) -closure))
-           (<let*> (((SCM *) s (<-> (<*> -stack) -index)
-                     (a (<ref> s (<c> i))) ..,))
+           (<let*> (((SCM *) s (<-> (<*> -stack) -index))
+                    (a (<ref> s (<c> i))) ...)
              (<begin> code ...)))))))
 #|
 ------------------------------------------------------------------------
@@ -914,13 +910,13 @@ closures
   (lambda (x)
     (syntax-case x ()      
       ((_ s (a ...) code ...)
-       #'(tcall-pre 2 () () (s a ...) (code ...) c-lambda-log)))))
+       #'(tcall-pre 1 () () (s a ...) (code ...) c-lambda-log)))))
 
 (define-syntax <lambda-log-p>
   (lambda (x)
     (syntax-case x ()      
       ((_ s (a ...) code ...)
-       #'(tcall-pre 2 () () (s a ...) (code ...) c-lambda-log-p)))))
+       #'(tcall-pre 1 () () (s a ...) (code ...) c-lambda-log-p)))))
 
 
 (define-syntax c-lambda
@@ -949,7 +945,7 @@ closures
                      (_
                       (lambda (fm)
                         (with-fluids ((*cage* cg))
-                          (((<let> (((SCM *) obj 
+                          (((<let*> (((SCM *) obj 
                                      (<scm-alloc> (<+> (<c> 1) 
                                                        (<c> (cg 'len))))))
                               (<=> (<ref> obj (<c> 1)) (*->scm lam))
@@ -958,36 +954,61 @@ closures
                               (scm*->scm obj))
                             v) fm))))))))))))))
 
+(define (mk-lam-lam cold cg s lam)
+  (lambda (v)
+    ;;(pk `(lambda lam ,v))
+    (match v
+      ('expr #f)
+      ('type 'SCM)
+      (_
+       (lambda (fm)
+         (with-fluids ((*cage* cold))
+           (((<let*> (((SCM *) p (<c> 0)) (SCM pp (<scm> #f)))
+               (<=> pp (<icall> 'gp_make_closure 
+                                (<c> (+ (cg 'len) 1)) 
+                                (<addr> p) s))
+                              (<=> (<ref> p (<c> 0)) (<icall> 'PTR2NUM lam))
+                              (f-begin 
+                               (cg 'clr p 1))
+                              pp)
+                            v) fm)))))))
+
 (define-syntax c-lambda-log
   (lambda (x)
     (syntax-case x ()
       ((_ (code ...) n (i ...) (s a ...))
        (with-syntax ((lam (datum->syntax x (gensym "lam"))))
-         #'(with-fluids ((*cage* (mk-lambda-cage -closure (fluid-ref *cage*))))
-             (let ((cg (fluid-ref *cage*)))
-               (define-log (lam a ...)
-                 (<begin> code ...))               
-               (lambda (v)
-                 ;;(pk `(lambda lam ,v))
-                 (match v
-                   ('expr #f)
-                   ('type 'SCM)
-                   (_
-                    (lambda (fm)
-                      (with-fluids ((*cage* cg))
-                        (((<let> (((SCM *) p) (SCM pp))
-                            (<=> pp (<icall> 'gp_make_closure (<c> (+ (cg 'len) 1)) (<addr> p) s))
-                            (<=> (<ref> p (<c> 0)) (*->scm lam))
-                            (f-begin 
-                             (cg 'clr p))
-                            pp)
-                          v) fm)))))))))))))
+         #'(let ((cold (fluid-ref *cage*)))
+             (with-fluids ((*cage* (mk-lambda-cage -closure (fluid-ref *cage*))))
+               (let ((cg (fluid-ref *cage*)))
+                 (define-log (lam a ...)
+                   (<begin> code ...))               
+                 (mk-lam-lam cold cg s lam)))))))))
 
 (define (transfer n x y)
-  (if (= n 0)
+  (if (<= n 0)
       '()
-      (cons (c= `(REF x n) `(REF y n)) 
+      (cons (c= `(AREF ,x ,(- n 1)) `(AREF ,y ,(- n 1)))
             (transfer (- n 1) x y))))
+
+(define (mk-lam-lam-p cold cg s lam)
+  (lambda (v)
+    ;;(pk `(lambda lam ,v))
+    (match v
+      ('expr #f)
+      ('type 'SCM)
+      (_
+       (lambda (fm)
+         (with-fluids ((*cage* cold))
+           (((<let> (((SCM *) p (<c> 0)) (SCM pp (<scm> #f)))
+               (<=> pp (<icall> 'gp_make_closure 
+                                (<c> (+ (cg 'len) 1)) 
+                                (<addr> p) s))
+               (<=> (<ref> p (<c> 0)) (<icall> 'PTR2NUM lam))
+               (f-begin 
+                (cg 'clr p 1))
+               pp)
+             v) fm)))))))
 
 (define-syntax c-lambda-log-p
   (lambda (x)
@@ -995,30 +1016,22 @@ closures
       ((_ (code ...) n (i ...) (s a ...))
        (with-syntax ((lam (datum->syntax x (gensym "lam"))))
          #'(let ((cl (mk-var '(SCM *) '__closure2 #f 'no-gensym)))
-             (with-fluids ((*cage* (mk-lambda-cage cl (fluid-ref *cage*))))
-             (let ((cg (fluid-ref *cage*)))
-               (define-log (lam a ...)
-                 (<let*> (((SCM *) cl))
-                   (lambda v (c-var (cl 'type) (cl #t)))
-                   (lambda v 
-                     (lambda (fm)
-                       (apply c-begin (transfer (cg 'len) (-closure #t) (cl #t)) fm )))
-                   code ...))               
-               (lambda (v)
-                 ;;(pk `(lambda lam ,v))
-                 (match v
-                   ('expr #f)
-                   ('type 'SCM)
-                   (_
-                    (lambda (fm)
-                      (with-fluids ((*cage* cg))
-                        (((<let> (((SCM *) p) (SCM pp))
-                            (<=> pp (<icall> 'gp_make_closure (<c> (+ (cg 'len) 1)) (<addr> p) s))
-                            (<=> (<ref> p (<c> 0)) (*->scm lam))
-                            (f-begin 
-                             (cg 'clr p))
-                            pp)
-                          v) fm)))))))))))))
+             (let ((cold (fluid-ref *cage*)))
+               (with-fluids ((*cage* (mk-lambda-cage cl (fluid-ref *cage*))))
+                 (let ((cg (fluid-ref *cage*)))
+                   (define-log (lam a ...)
+                     (lambda v 
+                       (lambda (fm)
+                         ((c-var `(%array SCM ,(cg 'len)) (cl #t)) fm)))
+                        
+                     (lambda v
+                       (lambda (fm)
+                         ((apply c-begin 
+                                 (transfer (cg 'len) 
+                                           '__closure2 '__closure))
+                          fm )))
+                     code ...)             
+                   (mk-lam-lam-p cold cg s lam))))))))))
 
 
 (define-syntax <s-lambda>
@@ -1109,3 +1122,13 @@ closures
                                (cg 'clr obj))
                               (scm*->scm obj))
                             v) fm))))))))))))))
+
+(define-syntax yield-log
+  (syntax-rules ()
+    ((_ name)
+     (<let*> (((SCM *) p (<cast> (SCM *) (<c> 0))) (SCM pp (<scm> #f)))
+       (<=> pp (<icall> 'gp_make_closure_heap 
+                        (<c> 1)
+                        (<addr> p)))
+       (<=> (<ref> p (<c> 0)) (<icall> 'PTR2NUM name))
+       pp))))

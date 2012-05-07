@@ -70,10 +70,17 @@
           (('top s) (if (assq s syms)
                         #f
                         (p 'top s)))
+
+          (('new-top s)
+           (p 'new-top s))
+
           (('new s) (set! syms (cons (cons s s) syms)))
-          (('ref s) (aif (it) (assq s syms)
-                        (cdr it)
-                        (p 'ref s))))))))
+          (('ref s . l) 
+           (aif (it) (assq s syms)
+                (cdr it)
+                (apply p 'ref s l))))))))
+
+(define *top* #f)
 
 (define mk-top-cage
   (let ((syms '())
@@ -82,11 +89,13 @@
       (parental parent p)
       (lambda x
         (match x
-          (('top s) (assq s syms))
-          (('new s) (set! syms (cons (cons s s) syms)))
-          (('ref s) (aif (it) (assq s syms)
-                        (cdr it)
-                        (p 'ref s))))))))
+          (('top s) (assq s syms))          
+          (((or 'new 'new-top) s) 
+           (set! syms (cons (cons s s) syms)))
+          (('ref s . l) 
+           (aif (it) (assq s syms)
+                (cdr it)
+                (apply p 'ref s l))))))))
 
 #|
 TODO, make closure variables work with set!
@@ -97,7 +106,7 @@ TODO, make closure variables work with set!
       (let ((syms '())
             (cp   '())
             (p     'no-parent)
-            (n      2))
+            (n      1))
         (parental parent p)
         (lambda x
           ;(pk `(cage ,x))
@@ -107,27 +116,40 @@ TODO, make closure variables work with set!
                           (p 'top s)))
             (('new s) 
              (set! syms (cons (cons s s) syms)))
-            (('ref '__closure)
+
+            (('new-top s)
+             (p 'new-top s))
+
+            (('ref '__closure  . l)
              '__closure)
-            (('ref s) (aif (it) (assq s syms)
-                           (cdr it)
-                           (aif (it) (assq s cp)
-                                ((cdr it) clr)
-                                (if (p 'top s)
-                                    (p 'ref s)
-                                    (let* ((m n)
-                                           (v (lambda (clr) 
-                                                `(AREF ,(clr #t) ,m))))
-                                      (set! cp (cons (cons s v) cp))
-                                      (set! n (+ n 1))
-                                      (p 'ref s)
-                                      (v clr))))))
+            (('ref '__closure2 . l)
+             '__closure2)
+
+            (('ref s . l) 
+             (aif (it) (assq s syms)
+                  (cdr it)
+                  (aif (it) (assq s cp)
+                       (apply (cdr it) clr l)
+                       (if (p 'top s)
+                           (p 'ref s)
+                           (let* ((m (- n 1))
+                                  (v (lambda (clr . l) 
+                                       (let ((k (match l (() 0) ((k) k))))
+                                         `(AREF ,(clr #t) ,(+ m k))))))
+                             (set! cp (cons (cons s v) cp))
+                             (set! n (+ n 1))
+                             (p 'ref s)
+                             (apply v clr l))))))
+
             (('len)     (length cp))
-            (('clr obj)   (map (lambda (cp)
-                                 (lambda v
-                                   (c= ((cdr cp) obj)
-                                       (p 'ref (car cp)))))
-                             (reverse cp))))))))
+            (('clr obj . l)   
+             (map (lambda (cp)
+                    (let ((k (match l 
+                               (() 0) ((n) n))))                    
+                      (lambda v
+                        (c= ((cdr cp) obj k)
+                            (p 'ref (car cp))))))
+                  (reverse cp))))))))
                                
 (define *cage* (make-fluid))
 (define *top*  (make-fluid))
@@ -136,11 +158,12 @@ TODO, make closure variables work with set!
 (fluid-set! *top* #t)
 
 (define (mk-var type sym val . l)
-  (let* ((g   (if (null? l)
-                  (gensym (symbol->string sym))
-                  sym))
+  (let* ((g   (match l
+                (()
+                 (gensym (symbol->string sym)))
+                (_ sym)))
          (use (lambda () ((fluid-ref *cage*) 'ref g))))
-    ((fluid-ref *cage*) 'new g)
+    ((fluid-ref *cage*) (match l ((_ _) 'new-top) (_ 'new)) g)
     (lambda v
       ;(pk `(var ,v))
       (match v
@@ -657,7 +680,7 @@ TODO, make closure variables work with set!
              (define f (mk-var `(lambda (,argt ...) ,(auto-type t))
                                (auto-t f)
                                #f
-                               'no-gensym))
+                               'no-gensym 'top))
              (set! *clambda*
                    (cons
                     (c-prototype (auto-type t) 
@@ -674,7 +697,7 @@ TODO, make closure variables work with set!
              (define f (mk-var `(lambda (,argt ...) ,(auto-type SCM))
                                (auto-t f)
                                #f
-                               'no-gensym))
+                               'no-gensym 'top))
              (set! *clambda*
                    (cons
                     (c-prototype (auto-type SCM) 
@@ -825,7 +848,7 @@ TODO, make closure variables work with set!
          #'(begin
              (define f (mk-var `(lambda (,argt ...) 'void)
                                (auto-t f)
-                               #f 'no-gensym))
+                               #f 'no-gensym 'top))
              (with-cage
               (let* ((arg (mk-var argt (auto-t arg) #f 'no-gensym)) 
                      ...)
@@ -851,7 +874,7 @@ TODO, make closure variables work with set!
          #'(begin
              (define f (mk-var `(lambda (,argt ...) ,(auto-type t))
                                (auto-t f)
-                               #f 'no-gensym))             
+                               #f 'no-gensym 'top))             
              (with-cage
               (let* ((arg (mk-var argt (auto-t arg) #f 'no-gensym)) 
                      ...)                      
